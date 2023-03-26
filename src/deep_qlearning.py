@@ -48,9 +48,10 @@ class DeepQLearningAgent(Agent):
         if random.uniform(0, 1) < self.epsilon:
             a = np.random.choice(tuple(valid_actions), 1)[0]
         else:
-            out = self.Q_nn(torch.from_numpy(state))
-            out_vals = np.take(out.detach().numpy(), list(valid_actions))
-            a = tuple(valid_actions)[np.argmax(out_vals)]
+            with torch.no_grad():
+                out = self.Q_nn(torch.from_numpy(state))
+                out_vals = np.take(out.detach().numpy(), list(valid_actions))
+                a = tuple(valid_actions)[np.argmax(out_vals)]
         self._action_distribution = np.full(shape=(self._env.num_actions,), fill_value=0.5)
         self._action_distribution[a] = 1
         return a
@@ -129,11 +130,12 @@ class DeepQLearningAgent(Agent):
         #     print("a")
 
     def copy_to_q(self):
-        target_net_state_dict = self.Q_nn.state_dict()
-        policy_net_state_dict = self.C_nn.state_dict()
-        for key in policy_net_state_dict:
-            target_net_state_dict[key] = policy_net_state_dict[key] * self.tau + target_net_state_dict[key] * (1 - self.tau)
-        self.Q_nn.load_state_dict(target_net_state_dict)
+        self.Q_nn = copy.deepcopy(self.C_nn)
+        # target_net_state_dict = self.Q_nn.state_dict()
+        # policy_net_state_dict = self.C_nn.state_dict()
+        # for key in policy_net_state_dict:
+        #     target_net_state_dict[key] = policy_net_state_dict[key] * self.tau + target_net_state_dict[key] * (1 - self.tau)
+        # self.Q_nn.load_state_dict(target_net_state_dict)
 
     def add_to_memory(self, entry):
         if len(self.memory) > 250:
