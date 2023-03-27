@@ -7,22 +7,22 @@ import torch.nn.functional as F
 import random
 from random import sample
 from src.agent import Agent
-
+import wandb
 
 class DQN(torch.nn.Module):
 
     def __init__(self, n_observations, n_actions):
         super(DQN, self).__init__()
-        self.layer1 = torch.nn.Linear(n_observations, 128)
-        self.layer2 = torch.nn.Linear(128, 128)
-        self.layer3 = torch.nn.Linear(128, n_actions)
+        self.layer1 = torch.nn.Linear(n_observations, 8)
+        self.layer2 = torch.nn.Linear(8, 8)
+        self.layer3 = torch.nn.Linear(8, n_actions)
 
     # Called with either one element to determine next action, or a batch
     # during optimization. Returns tensor([[left0exp,right0exp]...]).
     def forward(self, x):
         dx = x.double()
-        x = F.relu(self.layer1(x))
-        x = F.relu(self.layer2(x))
+        x = F.sigmoid(self.layer1(x))
+        x = F.sigmoid(self.layer2(x))
         return self.layer3(x)
 
 class DeepQLearningAgent(Agent):
@@ -38,8 +38,8 @@ class DeepQLearningAgent(Agent):
         self.optimizer = optim.AdamW(self.C_nn.parameters(), lr=lr, amsgrad=True)
         self.discount = discount
         self.epsilon = epsilon
-        self.decay = 1.00001
-        self.tau = 0.005
+        self.decay = 1.0001
+        self.tau = 0.05
         self.l1 = torch.nn.MSELoss()
         self.memory = []
         self.steps = 0
@@ -51,16 +51,22 @@ class DeepQLearningAgent(Agent):
             with torch.no_grad():
                 out = self.Q_nn(torch.from_numpy(state))
                 out_vals = np.take(out.detach().numpy(), list(valid_actions))
+                # filtrovat do budoucna pres valid actions
                 a = tuple(valid_actions)[np.argmax(out_vals)]
         self._action_distribution = np.full(shape=(self._env.num_actions,), fill_value=0.5)
         self._action_distribution[a] = 1
         return a
 
     def train(self):
+        wandb.init(
+            # set the wandb project where this run will be logged
+            project="isw_neuronka"
+        )
         self.Q_nn.double()
         self.C_nn.double()
         done = False
         steps = 0
+
         while not done:
             state, _, valid_actions, is_terminal = self._env.set_to_initial_state()
             total_reward = 0
@@ -76,9 +82,11 @@ class DeepQLearningAgent(Agent):
                 # print(f"Agent did {action} and got {r}")
             steps += 1
             self.epsilon /= self.decay
-            if steps % 1000 == 0:
-                print(steps)
-                self.steps += 1000
+            if self.epsilon <= 0.15:
+                self.decay = 1.0
+            if steps % 5 == 0:
+                # print(steps)
+                self.steps += 5
                 # if self.train_stop():
                 # if steps > 200000:
                 #     done = True
@@ -87,47 +95,53 @@ class DeepQLearningAgent(Agent):
                 self.copy_to_q()
 
             self.add_to_candidate()
+            wandb.log({"reward": total_reward})
             print(f"Total reward was {total_reward}.\n")
 
     def add_to_candidate(self):
-        sampled = random.sample(self.memory, int((len(self.memory) / 2)))
-        if len(sampled) < 1:
-            sampled = random.sample(self.memory, 1)
+        if len(self.memory) > 40:
+            sampled = random.sample(self.memory, 32)
+            if len(sampled) < 1:
+                sampled = random.sample(self.memory, 1)
 
-        reward = torch.from_numpy(np.array([sampled[i][2] for i in range(0, len(sampled))]))
-        state = torch.from_numpy(np.array([sampled[i][0] for i in range(0, len(sampled))]))
-        state2 = torch.from_numpy(np.array([sampled[i][3] for i in range(0, len(sampled))]))
-        action = torch.from_numpy(np.array([sampled[i][1] for i in range(0, len(sampled))]))
-        terminal = torch.from_numpy(np.array([sampled[i][4] for i in range(0, len(sampled))]))
+            reward = torch.from_numpy(np.array([sampled[i][2] for i in range(0, len(sampled))]))
+            state = torch.from_numpy(np.array([sampled[i][0] for i in range(0, len(sampled))]))
+            state2 = torch.from_numpy(np.array([sampled[i][3] for i in range(0, len(sampled))]))
+            action = torch.from_numpy(np.array([sampled[i][1] for i in range(0, len(sampled))]))
+            terminal = torch.from_numpy(np.array([sampled[i][4] for i in range(0, len(sampled))]))
 
-        nxt_test = self.C_nn(state)
-        state_action_values = self.C_nn(state).gather(1, action.type(torch.int64).unsqueeze(1))
-        next_state_values = torch.zeros(len(sampled))
-        with torch.no_grad():
-            next_state_values = self.Q_nn(state2).max(1)[0]
-        next_state_values[terminal] = 0.0
-        expected_state_action_values = (next_state_values * self.discount) + reward
+            nxt_test = self.C_nn(state)
+            state_action_values = self.C_nn(state).gather(1, action.type(torch.int64).unsqueeze(1))
+            # vals = state_action_values.detach().numpy()
+            if self.steps % 500 == 0:
+                wandb.log({"current_output": nxt_test.detach().numpy()})
+            next_state_values = torch.zeros(len(sampled))
+            with torch.no_grad():
+                next_state_values = self.Q_nn(state2).max(1)[0]
+            next_state_values[terminal] = 0.0
+            expected_state_action_values = (next_state_values * self.discount) + reward
 
-        self.optimizer.zero_grad()
-        crit = torch.nn.SmoothL1Loss()
-        loss = crit(expected_state_action_values, state_action_values)
-        # print(loss)
-        loss.backward()  # Compute gradients
-        self.optimizer.step()  # Backpropagate error
-        # print("a")
-        # for s in sampled:
-        #     self.optimizer.zero_grad()
-        #     reward = torch.from_numpy(np.array(s[3]))
-        #     state = torch.from_numpy(np.array(s[0]))
-        #     state2 = torch.from_numpy(np.array(s[4]))
-        #     action = torch.from_numpy(np.array(s[1]))
-        #     target = reward + torch.mul((self.discount * torch.max(self.C_nn(state2))), 1 - 0)
-        #     current = self.C_nn(state)
-        #
-        #     loss = self.l1(current, target)
-        #     loss.backward()  # Compute gradients
-        #     self.optimizer.step()  # Backpropagate error
-        #     print("a")
+            self.optimizer.zero_grad()
+            crit = torch.nn.SmoothL1Loss()
+            loss = crit(expected_state_action_values, state_action_values)
+            # print(loss)
+            loss.backward()  # Compute gradients
+            self.optimizer.step()
+            wandb.log({"loss": loss})# Backpropagate error
+            # print("a")
+            # for s in sampled:
+            #     self.optimizer.zero_grad()
+            #     reward = torch.from_numpy(np.array(s[3]))
+            #     state = torch.from_numpy(np.array(s[0]))
+            #     state2 = torch.from_numpy(np.array(s[4]))
+            #     action = torch.from_numpy(np.array(s[1]))
+            #     target = reward + torch.mul((self.discount * torch.max(self.C_nn(state2))), 1 - 0)
+            #     current = self.C_nn(state)
+            #
+            #     loss = self.l1(current, target)
+            #     loss.backward()  # Compute gradients
+            #     self.optimizer.step()  # Backpropagate error
+            #     print("a")
 
     def copy_to_q(self):
         self.Q_nn = copy.deepcopy(self.C_nn)
@@ -138,7 +152,7 @@ class DeepQLearningAgent(Agent):
         # self.Q_nn.load_state_dict(target_net_state_dict)
 
     def add_to_memory(self, entry):
-        if len(self.memory) > 250:
+        if len(self.memory) > 1000:
             del self.memory[0]
 
         self.memory.append(entry)
