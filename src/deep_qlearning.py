@@ -14,15 +14,15 @@ class DQN(torch.nn.Module):
     def __init__(self, n_observations, n_actions):
         super(DQN, self).__init__()
         self.layer1 = torch.nn.Linear(n_observations, 8)
-        self.layer2 = torch.nn.Linear(8, 8)
+        # self.layer2 = torch.nn.Linear(16, 8)
         self.layer3 = torch.nn.Linear(8, n_actions)
 
     # Called with either one element to determine next action, or a batch
     # during optimization. Returns tensor([[left0exp,right0exp]...]).
     def forward(self, x):
-        dx = x.double()
+        # dx = x.double()
         x = F.sigmoid(self.layer1(x))
-        x = F.sigmoid(self.layer2(x))
+        # x = F.sigmoid(self.layer2(x))
         return self.layer3(x)
 
 class DeepQLearningAgent(Agent):
@@ -38,7 +38,7 @@ class DeepQLearningAgent(Agent):
         self.optimizer = optim.AdamW(self.C_nn.parameters(), lr=lr, amsgrad=True)
         self.discount = discount
         self.epsilon = epsilon
-        self.decay = 1.0001
+        self.decay = 1.00001
         self.tau = 0.05
         self.l1 = torch.nn.MSELoss()
         self.memory = []
@@ -49,8 +49,9 @@ class DeepQLearningAgent(Agent):
             a = np.random.choice(tuple(valid_actions), 1)[0]
         else:
             with torch.no_grad():
-                out = self.Q_nn(torch.from_numpy(state))
+                out = self.Q_nn(torch.from_numpy(state).float())
                 out_vals = np.take(out.detach().numpy(), list(valid_actions))
+
                 # filtrovat do budoucna pres valid actions
                 a = tuple(valid_actions)[np.argmax(out_vals)]
         self._action_distribution = np.full(shape=(self._env.num_actions,), fill_value=0.5)
@@ -62,8 +63,6 @@ class DeepQLearningAgent(Agent):
             # set the wandb project where this run will be logged
             project="isw_neuronka"
         )
-        self.Q_nn.double()
-        self.C_nn.double()
         done = False
         steps = 0
 
@@ -77,32 +76,21 @@ class DeepQLearningAgent(Agent):
                 step = [previous_state, action, r, next_state.copy(), is_terminal]
                 total_reward += r
                 self.add_to_memory(step.copy())
-                state = next_state
-                # hash_val = hash(state.tobytes())
-                # print(f"Agent did {action} and got {r}")
+                state = next_state.copy()
             steps += 1
-            self.epsilon /= self.decay
-            if self.epsilon <= 0.15:
-                self.decay = 1.0
-            if steps % 5 == 0:
-                # print(steps)
-                self.steps += 5
-                # if self.train_stop():
-                # if steps > 200000:
-                #     done = True
-                #     self.save_table()
-                #     self.epsilon = -1.0
-                self.copy_to_q()
-
             self.add_to_candidate()
+            self.epsilon /= self.decay
+            if self.epsilon <= 0.2:
+                self.decay = 1.0
+            if steps % 2 == 0 and steps != 0:
+                self.steps += 2
+                # if self.train_stop():
+                self.copy_to_q()
             wandb.log({"reward": total_reward})
-            print(f"Total reward was {total_reward}.\n")
 
     def add_to_candidate(self):
-        if len(self.memory) > 40:
-            sampled = random.sample(self.memory, 32)
-            if len(sampled) < 1:
-                sampled = random.sample(self.memory, 1)
+        if len(self.memory) > 129:
+            sampled = random.sample(self.memory, 128)
 
             reward = torch.from_numpy(np.array([sampled[i][2] for i in range(0, len(sampled))]))
             state = torch.from_numpy(np.array([sampled[i][0] for i in range(0, len(sampled))]))
@@ -110,46 +98,25 @@ class DeepQLearningAgent(Agent):
             action = torch.from_numpy(np.array([sampled[i][1] for i in range(0, len(sampled))]))
             terminal = torch.from_numpy(np.array([sampled[i][4] for i in range(0, len(sampled))]))
 
-            nxt_test = self.C_nn(state)
-            state_action_values = self.C_nn(state).gather(1, action.type(torch.int64).unsqueeze(1))
-            # vals = state_action_values.detach().numpy()
-            if self.steps % 500 == 0:
-                wandb.log({"current_output": nxt_test.detach().numpy()})
+            state_action_values = self.C_nn(state.float()).gather(1, action.type(torch.int64).unsqueeze(1))
+
             next_state_values = torch.zeros(len(sampled))
             with torch.no_grad():
-                next_state_values = self.Q_nn(state2).max(1)[0]
+                next_state_values = self.Q_nn(state2.float()).max(1)[0]
+
             next_state_values[terminal] = 0.0
             expected_state_action_values = (next_state_values * self.discount) + reward
 
+            crit = torch.nn.MSELoss()
+            loss = crit(state_action_values, expected_state_action_values.unsqueeze(1))
             self.optimizer.zero_grad()
-            crit = torch.nn.SmoothL1Loss()
-            loss = crit(expected_state_action_values, state_action_values)
-            # print(loss)
-            loss.backward()  # Compute gradients
+            loss.backward()
+            torch.nn.utils.clip_grad_value_(self.C_nn.parameters(), 5)
             self.optimizer.step()
-            wandb.log({"loss": loss})# Backpropagate error
-            # print("a")
-            # for s in sampled:
-            #     self.optimizer.zero_grad()
-            #     reward = torch.from_numpy(np.array(s[3]))
-            #     state = torch.from_numpy(np.array(s[0]))
-            #     state2 = torch.from_numpy(np.array(s[4]))
-            #     action = torch.from_numpy(np.array(s[1]))
-            #     target = reward + torch.mul((self.discount * torch.max(self.C_nn(state2))), 1 - 0)
-            #     current = self.C_nn(state)
-            #
-            #     loss = self.l1(current, target)
-            #     loss.backward()  # Compute gradients
-            #     self.optimizer.step()  # Backpropagate error
-            #     print("a")
+            wandb.log({"loss": loss})
 
     def copy_to_q(self):
-        self.Q_nn = copy.deepcopy(self.C_nn)
-        # target_net_state_dict = self.Q_nn.state_dict()
-        # policy_net_state_dict = self.C_nn.state_dict()
-        # for key in policy_net_state_dict:
-        #     target_net_state_dict[key] = policy_net_state_dict[key] * self.tau + target_net_state_dict[key] * (1 - self.tau)
-        # self.Q_nn.load_state_dict(target_net_state_dict)
+        self.Q_nn.load_state_dict(self.C_nn.state_dict())
 
     def add_to_memory(self, entry):
         if len(self.memory) > 1000:

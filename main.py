@@ -9,7 +9,7 @@ if __name__ == '__main__':
     # env = MultiArmedBandit()
     # env = FrozenLake()
     env = CartPole()
-    agent = DeepQLearningAgent(env, 0.0001, 0.99, 0.99)
+    agent = DeepQLearningAgent(env, 0.001, 0.99, 0.9)
     agent.train()
 
     # print(env.evaluate(agent))
